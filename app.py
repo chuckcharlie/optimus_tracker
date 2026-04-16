@@ -132,6 +132,13 @@ class _MultiFormParser(HTMLParser):
             inputs_list = self._cur["inputs"]
             assert isinstance(inputs_list, list)
             inputs_list.append(ad)
+        elif self._cur is not None and tag == "button":
+            # MVC sites often use <button type="submit" name="..."> instead of <input type="submit">.
+            typ = (ad.get("type") or "submit").lower()
+            if typ in ("submit", "button", ""):
+                inputs_list = self._cur["inputs"]
+                assert isinstance(inputs_list, list)
+                inputs_list.append({**ad, "_element": "button"})
 
     def handle_endtag(self, tag: str) -> None:
         if tag != "form" or self._depth == 0:
@@ -248,6 +255,17 @@ def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> di
         token = _request_verification_token_from_html(html)
         if token is not None:
             payload["__RequestVerificationToken"] = token
+    # Named submit controls are often required (ASP.NET MVC).
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = inp.get("name")
+        if not name:
+            continue
+        typ = (inp.get("type") or "text").lower()
+        is_button = inp.get("_element") == "button"
+        if typ == "submit" or (is_button and typ in ("submit", "button", "")):
+            payload[str(name)] = str(inp.get("value", ""))
     return payload
 
 
@@ -317,7 +335,21 @@ def handle_2fa(session: requests.Session, two_factor_url: str, code: str) -> boo
         return True
 
     print(f"[auth] 2FA verification failed. Status {response.status_code}, url: {response.url}")
-    if response.status_code >= 400:
+    final = response.url.lower()
+    if "/account/login" in final:
+        print(
+            "[auth] Optimus sent you back to the login page. Common causes: wrong SMS code, "
+            "code already used, or the 2FA step timed out. Request a new text and run "
+            "login again within a minute or two."
+        )
+    err = re.search(
+        r'class="[^"]*field-validation-error[^"]*"[^>]*>([^<]+)',
+        response.text,
+        re.I,
+    )
+    if err:
+        print(f"[auth] Server message: {err.group(1).strip()}")
+    if response.status_code >= 400 or OPTIMUS_DEBUG:
         snippet = re.sub(r"\s+", " ", response.text[:1500])
         print(f"[auth] Response body (truncated): {snippet}")
     return False
