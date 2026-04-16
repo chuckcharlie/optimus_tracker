@@ -19,7 +19,6 @@ Set these via `docker-compose.yml` (same pattern as the `awspaghetti` project in
 | `MQ_TOPIC_PREFIX` | Topic prefix before vehicle slug | No | `cars` → topic `cars/f350` |
 | `INTERVAL_SECONDS` | Seconds between poll loops | No | `10` |
 | `OPTIMUS_DEVICE_ID` | Login form `DeviceId` fingerprint | No | default in `app.py` |
-| `OPTIMUS_SMS_CODE` | SMS code for `login` when not using `-it` / `--code` | No | only for one-off `login` |
 
 ### Session refresh and SMS 2FA
 
@@ -37,18 +36,6 @@ docker exec -it optimus-checker python /app/app.py login
 
 ```bash
 docker exec optimus-checker python /app/app.py login --code 123456
-```
-
-**Pipe the code (no TTY):**
-
-```bash
-printf '%s\n' 123456 | docker exec -i optimus-checker python /app/app.py login
-```
-
-**Environment variable (one line):**
-
-```bash
-docker exec -e OPTIMUS_SMS_CODE=123456 optimus-checker python /app/app.py login
 ```
 
 Replace `optimus-checker` with your `container_name` from `docker-compose.yml` if different.

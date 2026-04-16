@@ -113,7 +113,7 @@ def _read_sms_code(cli_code: str | None) -> str | None:
 
 def login_interactive(session: requests.Session, sms_code: str | None = None) -> bool:
     """
-    Full login; prompts for SMS or uses --code / OPTIMUS_SMS_CODE / stdin line.
+    Full login; prompts for SMS or uses --code (and optional env/stdin fallbacks).
     """
     if not USERNAME or not PASSWORD:
         print("[error] Set OPTIMUS_USER and OPTIMUS_PASS in environment.")
@@ -135,7 +135,6 @@ def login_interactive(session: requests.Session, sms_code: str | None = None) ->
             print("[error] No SMS code provided. Use one of:")
             print("  docker exec -it optimus-checker python /app/app.py login")
             print("  docker exec optimus-checker python /app/app.py login --code 123456")
-            print("  docker exec -i optimus-checker sh -c 'printf \"%s\\n\" 123456 | python /app/app.py login'")
             return False
         return handle_2fa(session, two_factor, code)
 
