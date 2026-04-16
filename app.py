@@ -23,6 +23,7 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -44,6 +45,8 @@ MQ_TOPIC_PREFIX = os.environ.get("MQ_TOPIC_PREFIX", "cars").strip("/") or "cars"
 OPTIMUS_DEBUG = os.environ.get("OPTIMUS_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # Optimus M2FactorAuth form leaves these empty in HTML (browser JS fills them). Must match login POST.
 OPTIMUS_PLATFORM = os.environ.get("OPTIMUS_PLATFORM", "Web").strip() or "Web"
+# IANA name for report_date_local (e.g. America/Denver). Empty = container/host local time.
+OPTIMUS_TIMEZONE = os.environ.get("OPTIMUS_TIMEZONE", "").strip()
 # Single source of truth with build_http_session() — hidden field "UserAgent" must align.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -590,6 +593,22 @@ def get_devices(session: requests.Session) -> dict:
     return response.json()
 
 
+def _timezone_for_report_local():
+    """ZoneInfo from OPTIMUS_TIMEZONE, or None to use system local time."""
+    if not OPTIMUS_TIMEZONE:
+        return None
+    try:
+        return ZoneInfo(OPTIMUS_TIMEZONE)
+    except Exception as exc:
+        if not getattr(_timezone_for_report_local, "_warned", False):
+            print(
+                f"[data] Invalid OPTIMUS_TIMEZONE={OPTIMUS_TIMEZONE!r}: {exc}; "
+                "using system local time for report_date_local."
+            )
+            _timezone_for_report_local._warned = True
+        return None
+
+
 def parse_report_date(raw_value: str | None) -> tuple[str | None, str | None]:
     if not isinstance(raw_value, str):
         return None, None
@@ -598,7 +617,8 @@ def parse_report_date(raw_value: str | None) -> tuple[str | None, str | None]:
         return None, None
     epoch_ms = int(match.group(1))
     dt_utc = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-    dt_local = dt_utc.astimezone()
+    tz = _timezone_for_report_local()
+    dt_local = dt_utc.astimezone(tz) if tz is not None else dt_utc.astimezone()
     return dt_utc.isoformat(), dt_local.isoformat()
 
 

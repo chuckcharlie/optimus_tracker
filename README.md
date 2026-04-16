@@ -21,6 +21,7 @@ Set these via `docker-compose.yml` or any orchestrator that injects environment 
 | `OPTIMUS_DEVICE_ID` | Optional override for login `DeviceId` fingerprint | No | UUID string |
 | `OPTIMUS_PLATFORM` | Hidden `Platform` on SMS 2FA form if empty in HTML | No | `Web` |
 | `OPTIMUS_DEBUG` | Verbose auth logging | No | `1` or `true` |
+| `OPTIMUS_TIMEZONE` | IANA timezone for `report_date_local` in JSON/MQTT | No | `America/Denver` |
 
 ### MQTT topics and payload
 

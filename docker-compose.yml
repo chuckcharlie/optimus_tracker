@@ -13,5 +13,6 @@ services:
       - MQ_PORT=1883
       - MQ_TOPIC_PREFIX=cars
       - INTERVAL_SECONDS=10
+      - OPTIMUS_TIMEZONE=America/Denver
     volumes:
       - ./data:/data
