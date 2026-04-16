@@ -42,6 +42,14 @@ MQ_ADDRESS = os.environ.get("MQ_ADDRESS", "mosquitto.dickinson")
 MQ_PORT = int(os.environ.get("MQ_PORT", "1883"))
 MQ_TOPIC_PREFIX = os.environ.get("MQ_TOPIC_PREFIX", "cars").strip("/") or "cars"
 OPTIMUS_DEBUG = os.environ.get("OPTIMUS_DEBUG", "").strip().lower() in ("1", "true", "yes")
+# Optimus M2FactorAuth form leaves these empty in HTML (browser JS fills them). Must match login POST.
+OPTIMUS_PLATFORM = os.environ.get("OPTIMUS_PLATFORM", "Web").strip() or "Web"
+# Single source of truth with build_http_session() — hidden field "UserAgent" must align.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def load_session(session: requests.Session) -> bool:
@@ -222,7 +230,8 @@ def _code_field_name(inputs: list[dict]) -> str:
         if typ in ("text", "tel", "number", "password", ""):
             text_names.append(str(name))
     lower = [n.lower() for n in text_names]
-    for hint in ("twofactor", "verifycode", "smscode", "otp", "mfa", "2fa"):
+    # Optimus uses name="Otp" for SMS (match before generic "code").
+    for hint in ("otp", "twofactor", "verifycode", "smscode", "mfa", "2fa"):
         for i, n in enumerate(lower):
             if hint in n:
                 return text_names[i]
@@ -272,7 +281,21 @@ def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> di
         if typ == "submit" or (is_button and typ in ("submit", "button", "")):
             payload[str(name)] = str(inp.get("value", ""))
     _merge_lone_select(html, payload)
+    _apply_m2fa_client_hiddens(payload)
     return payload
+
+
+def _apply_m2fa_client_hiddens(payload: dict[str, str]) -> None:
+    """
+    M2FactorAuth HTML often ships empty DeviceId / Platform / UserAgent; the live site
+    fills them in script. Server validation still requires them — mirror login fingerprint.
+    """
+    if not str(payload.get("DeviceId", "")).strip():
+        payload["DeviceId"] = get_device_id()
+    if not str(payload.get("Platform", "")).strip():
+        payload["Platform"] = OPTIMUS_PLATFORM
+    if not str(payload.get("UserAgent", "")).strip():
+        payload["UserAgent"] = BROWSER_USER_AGENT
 
 
 def _extract_mvc_validation_messages(html: str) -> list[str]:
@@ -546,11 +569,7 @@ def build_http_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": BROWSER_USER_AGENT,
             "Referer": BASE_URL,
         }
     )

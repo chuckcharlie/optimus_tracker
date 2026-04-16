@@ -19,6 +19,8 @@ Set these via `docker-compose.yml` or any orchestrator that injects environment 
 | `MQ_TOPIC_PREFIX` | Topic prefix before vehicle slug | No | `cars` → topic `cars/f350` |
 | `INTERVAL_SECONDS` | Seconds between poll loops | No | `10` |
 | `OPTIMUS_DEVICE_ID` | Optional override for login `DeviceId` fingerprint | No | UUID string |
+| `OPTIMUS_PLATFORM` | Hidden `Platform` on SMS 2FA form if empty in HTML | No | `Web` |
+| `OPTIMUS_DEBUG` | Verbose auth logging | No | `1` or `true` |
 
 ### MQTT topics and payload
 
