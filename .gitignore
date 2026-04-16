@@ -1,0 +1,9 @@
+# Local overrides (never commit real secrets)
+.env
+.env.local
+
+# Runtime state from the bind-mounted volume
+data/
+
+__pycache__/
+*.pyc

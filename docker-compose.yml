@@ -1,0 +1,17 @@
+services:
+  optimus-checker:
+    # Replace YOUR_DOCKERHUB_USERNAME with your Docker Hub user (or registry path).
+    # After CodeBuild pushes images, point this at the same repo:tag you publish.
+    image: YOUR_DOCKERHUB_USERNAME/optimus-checker:latest
+    build: .
+    container_name: optimus-checker
+    restart: unless-stopped
+    environment:
+      - OPTIMUS_USER=your@email.com
+      - OPTIMUS_PASS=changeme
+      - MQ_ADDRESS=mqtt.example.com
+      - MQ_PORT=1883
+      - MQ_TOPIC_PREFIX=cars
+      - INTERVAL_SECONDS=10
+    volumes:
+      - ./data:/data
