@@ -23,6 +23,8 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 import paho.mqtt.client as mqtt
 import requests
@@ -39,6 +41,7 @@ PASSWORD = os.environ.get("OPTIMUS_PASS", "")
 MQ_ADDRESS = os.environ.get("MQ_ADDRESS", "mosquitto.dickinson")
 MQ_PORT = int(os.environ.get("MQ_PORT", "1883"))
 MQ_TOPIC_PREFIX = os.environ.get("MQ_TOPIC_PREFIX", "cars").strip("/") or "cars"
+OPTIMUS_DEBUG = os.environ.get("OPTIMUS_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
 def load_session(session: requests.Session) -> bool:
@@ -109,6 +112,152 @@ def session_is_valid(session: requests.Session) -> bool:
     return False
 
 
+class _MultiFormParser(HTMLParser):
+    """Collect each <form> on the page with its action and <input> tags."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.forms: list[dict[str, object]] = []
+        self._cur: dict[str, object] | None = None
+        self._depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        ad = {k.lower(): v for k, v in attrs}
+        if tag == "form":
+            if self._depth == 0:
+                self._cur = {"action": ad.get("action", "").strip(), "inputs": []}
+            self._depth += 1
+            return
+        if self._cur is not None and tag == "input":
+            inputs_list = self._cur["inputs"]
+            assert isinstance(inputs_list, list)
+            inputs_list.append(ad)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "form" or self._depth == 0:
+            return
+        self._depth -= 1
+        if self._depth == 0 and self._cur is not None:
+            self.forms.append(self._cur)
+            self._cur = None
+
+
+def _parse_forms(html: str) -> list[dict[str, object]]:
+    parser = _MultiFormParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return parser.forms
+
+
+def _request_verification_token_from_html(html: str) -> str | None:
+    for pattern in (
+        r'name=["\']__RequestVerificationToken["\']\s+value=["\']([^"\']*)["\']',
+        r'value=["\']([^"\']*)["\']\s+name=["\']__RequestVerificationToken["\']',
+    ):
+        m = re.search(pattern, html, re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _pick_2fa_form(forms: list[dict[str, object]], page_url: str) -> dict[str, object] | None:
+    """Prefer the real 2FA form over layout forms (search bar, etc.)."""
+    if not forms:
+        return None
+    scored: list[tuple[int, dict[str, object]]] = []
+    for form in forms:
+        action = str(form.get("action") or "")
+        full = urljoin(page_url, action).lower()
+        score = 0
+        if any(s in full for s in ("m2factor", "factorauth", "twofactor", "verify", "2fa")):
+            score += 20
+        inputs = form.get("inputs")
+        if not isinstance(inputs, list):
+            continue
+        names = " ".join(
+            (str(inp.get("name") or "")).lower()
+            for inp in inputs
+            if isinstance(inp, dict)
+        )
+        if "__requestverificationtoken" in names:
+            score += 10
+        if any(x in names for x in ("code", "sms", "verify", "otp", "mfa", "pin", "twofactor")):
+            score += 5
+        for inp in inputs:
+            if not isinstance(inp, dict):
+                continue
+            typ = (inp.get("type") or "text").lower()
+            if typ == "hidden":
+                continue
+            if typ in ("text", "tel", "number", "password", ""):
+                score += 3
+                break
+        scored.append((score, form))
+    scored.sort(key=lambda x: -x[0])
+    if scored[0][0] > 0:
+        return scored[0][1]
+    return forms[0]
+
+
+def _code_field_name(inputs: list[dict]) -> str:
+    text_names: list[str] = []
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = inp.get("name")
+        if not name:
+            continue
+        typ = (inp.get("type") or "text").lower()
+        if typ == "hidden":
+            continue
+        if typ in ("text", "tel", "number", "password", ""):
+            text_names.append(str(name))
+    lower = [n.lower() for n in text_names]
+    for hint in ("twofactor", "verifycode", "smscode", "otp", "mfa", "2fa"):
+        for i, n in enumerate(lower):
+            if hint in n:
+                return text_names[i]
+    for hint in ("code", "verify", "sms", "pin"):
+        for i, n in enumerate(lower):
+            if hint in n and "verification" not in n:
+                return text_names[i]
+    if text_names:
+        return text_names[0]
+    return "Code"
+
+
+def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> dict[str, str]:
+    inputs = form.get("inputs")
+    if not isinstance(inputs, list):
+        inputs = []
+    payload: dict[str, str] = {}
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = inp.get("name")
+        if not name:
+            continue
+        typ = (inp.get("type") or "text").lower()
+        if typ == "hidden":
+            payload[str(name)] = str(inp.get("value", ""))
+    code_name = _code_field_name(inputs)
+    payload[code_name] = sms_code.strip()
+    if "__RequestVerificationToken" not in payload:
+        token = _request_verification_token_from_html(html)
+        if token is not None:
+            payload["__RequestVerificationToken"] = token
+    return payload
+
+
+def _m2fa_post_url(form: dict[str, object], page_url: str) -> str:
+    action = str(form.get("action") or "").strip()
+    if action:
+        return urljoin(page_url, action)
+    return page_url
+
+
 def _two_factor_url(response: requests.Response) -> str | None:
     url = response.url.lower()
     # Optimus has used routes like /Account/M2FactorAuth for SMS flows.
@@ -125,13 +274,52 @@ def _two_factor_url(response: requests.Response) -> str | None:
 
 
 def handle_2fa(session: requests.Session, two_factor_url: str, code: str) -> bool:
-    payload = {"Code": code}
-    response = session.post(two_factor_url, data=payload, allow_redirects=True, timeout=15)
+    """
+    ASP.NET MVC expects __RequestVerificationToken and the correct form fields.
+    A bare POST with only Code often returns HTTP 500. We also avoid submitting
+    the site's first form (e.g. header search) by scoring forms on the page.
+    """
+    page = session.get(two_factor_url, timeout=15)
+    if page.status_code != 200:
+        print(f"[auth] Could not load 2FA page: HTTP {page.status_code}")
+        return False
+
+    html = page.text
+    forms = _parse_forms(html)
+    form = _pick_2fa_form(forms, page.url)
+    if form is None:
+        print("[auth] No HTML form found on 2FA page.")
+        return False
+
+    post_url = _m2fa_post_url(form, page.url)
+    payload = _build_m2fa_payload(form, html, code)
+    if OPTIMUS_DEBUG:
+        safe = {}
+        for k, v in payload.items():
+            if "token" in k.lower() or "verification" in k.lower():
+                safe[k] = "<redacted>"
+            else:
+                s = str(v)
+                safe[k] = s[:12] + ("…" if len(s) > 12 else "")
+        print(f"[auth] debug: posting to {post_url} fields={list(payload.keys())} preview={safe}")
+
+    headers = {"Referer": page.url}
+    response = session.post(
+        post_url,
+        data=payload,
+        headers=headers,
+        allow_redirects=True,
+        timeout=15,
+    )
     if session_is_valid(session):
         print("[auth] 2FA verified, login successful.")
         save_session(session)
         return True
+
     print(f"[auth] 2FA verification failed. Status {response.status_code}, url: {response.url}")
+    if response.status_code >= 400:
+        snippet = re.sub(r"\s+", " ", response.text[:1500])
+        print(f"[auth] Response body (truncated): {snippet}")
     return False
 
 
