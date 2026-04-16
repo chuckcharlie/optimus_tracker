@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
@@ -31,14 +32,13 @@ LOGIN_URL = f"{BASE_URL}/Account/Login"
 GET_DEVICES_URL = f"{BASE_URL}/Home/GetDevices"
 SESSION_FILE = "/data/optimus_session.json"
 MQ_STATE_FILE = "/data/optimus_mq_state.json"
+DEVICE_ID_FILE = "/data/optimus_device_id.txt"
 
 USERNAME = os.environ.get("OPTIMUS_USER", "")
 PASSWORD = os.environ.get("OPTIMUS_PASS", "")
 MQ_ADDRESS = os.environ.get("MQ_ADDRESS", "mosquitto.dickinson")
 MQ_PORT = int(os.environ.get("MQ_PORT", "1883"))
 MQ_TOPIC_PREFIX = os.environ.get("MQ_TOPIC_PREFIX", "cars").strip("/") or "cars"
-
-DEVICE_ID = os.environ.get("OPTIMUS_DEVICE_ID", "7521b464-3e59-4af2-8f6a-5a93500dd555")
 
 
 def load_session(session: requests.Session) -> bool:
@@ -63,6 +63,39 @@ def save_session(session: requests.Session) -> None:
         json.dump(cookies, f)
     os.chmod(SESSION_FILE, 0o600)
     print(f"[auth] Session saved to {SESSION_FILE}")
+
+
+def get_device_id() -> str:
+    """
+    Resolve login DeviceId with this precedence:
+    1) OPTIMUS_DEVICE_ID environment override
+    2) persisted /data device id file
+    3) generated UUID persisted for future runs
+    """
+    env_device_id = os.environ.get("OPTIMUS_DEVICE_ID", "").strip()
+    if env_device_id:
+        return env_device_id
+
+    try:
+        if os.path.exists(DEVICE_ID_FILE):
+            with open(DEVICE_ID_FILE, encoding="utf-8") as f:
+                persisted = f.read().strip()
+            if persisted:
+                return persisted
+    except OSError:
+        pass
+
+    generated = str(uuid.uuid4())
+    try:
+        os.makedirs(os.path.dirname(DEVICE_ID_FILE) or ".", exist_ok=True)
+        with open(DEVICE_ID_FILE, "w", encoding="utf-8") as f:
+            f.write(generated + "\n")
+        os.chmod(DEVICE_ID_FILE, 0o600)
+        print(f"[auth] Generated persistent DeviceId at {DEVICE_ID_FILE}")
+    except OSError as exc:
+        # Continue with in-memory ID if file write fails.
+        print(f"[auth] Could not persist DeviceId ({exc}); using generated value for this run.")
+    return generated
 
 
 def session_is_valid(session: requests.Session) -> bool:
@@ -120,8 +153,9 @@ def login_interactive(session: requests.Session, sms_code: str | None = None) ->
         return False
 
     print("[auth] Logging in (interactive)...")
+    device_id = get_device_id()
     payload = {
-        "DeviceId": DEVICE_ID,
+        "DeviceId": device_id,
         "Username": USERNAME,
         "Password": PASSWORD,
     }
@@ -153,8 +187,9 @@ def login_noninteractive(session: requests.Session) -> bool:
         return False
 
     print("[auth] Logging in...")
+    device_id = get_device_id()
     payload = {
-        "DeviceId": DEVICE_ID,
+        "DeviceId": device_id,
         "Username": USERNAME,
         "Password": PASSWORD,
     }

@@ -18,7 +18,7 @@ Set these via `docker-compose.yml` or any orchestrator that injects environment 
 | `MQ_PORT` | MQTT broker port | No | `1883` |
 | `MQ_TOPIC_PREFIX` | Topic prefix before vehicle slug | No | `cars` → topic `cars/f350` |
 | `INTERVAL_SECONDS` | Seconds between poll loops | No | `10` |
-| `OPTIMUS_DEVICE_ID` | Login form `DeviceId` fingerprint | No | default in `app.py` |
+| `OPTIMUS_DEVICE_ID` | Optional override for login `DeviceId` fingerprint | No | UUID string |
 
 ### MQTT topics and payload
 
@@ -75,3 +75,4 @@ Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no a
 
 - `optimus_session.json` — session cookies
 - `optimus_mq_state.json` — last published coordinates for de-duplication
+- `optimus_device_id.txt` — auto-generated persistent login `DeviceId` (unless `OPTIMUS_DEVICE_ID` is set)
