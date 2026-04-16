@@ -266,7 +266,35 @@ def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> di
         is_button = inp.get("_element") == "button"
         if typ == "submit" or (is_button and typ in ("submit", "button", "")):
             payload[str(name)] = str(inp.get("value", ""))
+    _merge_lone_select(html, payload)
     return payload
+
+
+def _merge_lone_select(html: str, payload: dict[str, str]) -> None:
+    """If the page has exactly one <select>, include it (e.g. SMS vs authenticator)."""
+    matches = list(
+        re.finditer(
+            r'<select[^>]+name=["\']([^"\']+)["\'][^>]*>(.*?)</select>',
+            html,
+            re.I | re.DOTALL,
+        )
+    )
+    if len(matches) != 1:
+        return
+    m = matches[0]
+    name = m.group(1)
+    if name in payload:
+        return
+    block = m.group(2)
+    opt = re.search(
+        r'<option[^>]+selected[^>]+value=["\']([^"\']*)["\']',
+        block,
+        re.I,
+    )
+    if not opt:
+        opt = re.search(r'<option[^>]+value=["\']([^"\']*)["\']', block, re.I)
+    if opt:
+        payload[name] = opt.group(1)
 
 
 def _m2fa_post_url(form: dict[str, object], page_url: str) -> str:
@@ -291,25 +319,49 @@ def _two_factor_url(response: requests.Response) -> str | None:
     return None
 
 
-def handle_2fa(session: requests.Session, two_factor_url: str, code: str) -> bool:
+def handle_2fa(
+    session: requests.Session,
+    two_factor_url: str,
+    code: str,
+    *,
+    login_response: requests.Response | None = None,
+) -> bool:
     """
     ASP.NET MVC expects __RequestVerificationToken and the correct form fields.
     A bare POST with only Code often returns HTTP 500. We also avoid submitting
     the site's first form (e.g. header search) by scoring forms on the page.
-    """
-    page = session.get(two_factor_url, timeout=15)
-    if page.status_code != 200:
-        print(f"[auth] Could not load 2FA page: HTTP {page.status_code}")
-        return False
 
-    html = page.text
+    If login_response is the immediate POST /Login redirect to M2FactorAuth, we use
+    that response body instead of issuing a second GET. A fresh GET can rotate
+    antiforgery tokens and break the partial-login cookie pair.
+    """
+    page_url: str
+    html: str
+
+    if (
+        login_response is not None
+        and login_response.status_code == 200
+        and _two_factor_url(login_response)
+        and "<form" in login_response.text.lower()
+    ):
+        html = login_response.text
+        page_url = login_response.url
+        print("[auth] Using 2FA page HTML from login redirect (no extra GET).")
+    else:
+        page = session.get(two_factor_url, timeout=15)
+        if page.status_code != 200:
+            print(f"[auth] Could not load 2FA page: HTTP {page.status_code}")
+            return False
+        html = page.text
+        page_url = page.url
+
     forms = _parse_forms(html)
-    form = _pick_2fa_form(forms, page.url)
+    form = _pick_2fa_form(forms, page_url)
     if form is None:
         print("[auth] No HTML form found on 2FA page.")
         return False
 
-    post_url = _m2fa_post_url(form, page.url)
+    post_url = _m2fa_post_url(form, page_url)
     payload = _build_m2fa_payload(form, html, code)
     if OPTIMUS_DEBUG:
         safe = {}
@@ -321,7 +373,10 @@ def handle_2fa(session: requests.Session, two_factor_url: str, code: str) -> boo
                 safe[k] = s[:12] + ("…" if len(s) > 12 else "")
         print(f"[auth] debug: posting to {post_url} fields={list(payload.keys())} preview={safe}")
 
-    headers = {"Referer": page.url}
+    headers = {
+        "Referer": page_url,
+        "Origin": BASE_URL,
+    }
     response = session.post(
         post_url,
         data=payload,
@@ -398,7 +453,7 @@ def login_interactive(session: requests.Session, sms_code: str | None = None) ->
             print("  docker exec -it optimus-checker python /app/app.py login")
             print("  docker exec optimus-checker python /app/app.py login --code 123456")
             return False
-        return handle_2fa(session, two_factor, code)
+        return handle_2fa(session, two_factor, code, login_response=response)
 
     if session_is_valid(session):
         print("[auth] Login successful.")
