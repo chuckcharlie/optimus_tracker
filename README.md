@@ -42,56 +42,9 @@ Replace `optimus-checker` with your `container_name` from `docker-compose.yml` i
 
 Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no arguments the app does the same (used by the entrypoint loop).
 
-## Local run (build from source)
-
-1. Edit `docker-compose.yml`: replace `YOUR_DOCKERHUB_USERNAME`, credentials, and `MQ_ADDRESS` with your values.
-2. Start:
-
-```bash
-docker compose up -d --build
-```
-
-3. Logs:
-
-```bash
-docker compose logs -f
-```
-
 ## Persistent data
 
 `./data` on the host is mounted to `/data` in the container. It stores:
 
 - `optimus_session.json` — session cookies
 - `optimus_mq_state.json` — last published coordinates for de-duplication
-
-## AWS CodeBuild (Docker Hub)
-
-This repo mirrors the layout used in `awspaghetti`:
-
-- `buildspec.yml` — per-architecture image build and push (`VERSION` from `version.txt`)
-- `buildspec-manifest.yml` — multi-arch manifest after `arm64` and `amd64` builds exist
-
-CodeBuild environment variables expected (same as `awspaghetti`):
-
-- `IMAGE_REPO_NAME` — Docker Hub repository name (for example `optimus-checker`)
-- `IMAGE_TAG` — extra tag segment (for example `latest` or `dev`)
-- `ARCH` — `arm64` or `amd64` for the single-arch build project
-
-Secrets Manager (adjust paths to match your account):
-
-- `/dockerhub/credentials:username`
-- `/dockerhub/credentials:password`
-
-Build command excerpt:
-
-```bash
-VERSION=$(cat version.txt)
-docker build -t $DOCKERHUB_USERNAME/$IMAGE_REPO_NAME:$VERSION-$ARCH ...
-```
-
-After images exist for both architectures, run the manifest buildspec to publish `$VERSION` and `latest` manifest lists.
-
-## Public repository hygiene
-
-- Do not commit real passwords or broker hostnames you consider private; use placeholders in `docker-compose.yml` and replace locally.
-- `data/` is gitignored so session and de-dupe files are not committed.
