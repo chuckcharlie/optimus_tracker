@@ -249,6 +249,11 @@ def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> di
         typ = (inp.get("type") or "text").lower()
         if typ == "hidden":
             payload[str(name)] = str(inp.get("value", ""))
+        elif typ == "checkbox":
+            # Browsers only submit checked boxes.
+            if inp.get("checked") is None and "checked" not in inp:
+                continue
+            payload[str(name)] = str(inp.get("value", "true"))
     code_name = _code_field_name(inputs)
     payload[code_name] = sms_code.strip()
     if "__RequestVerificationToken" not in payload:
@@ -268,6 +273,38 @@ def _build_m2fa_payload(form: dict[str, object], html: str, sms_code: str) -> di
             payload[str(name)] = str(inp.get("value", ""))
     _merge_lone_select(html, payload)
     return payload
+
+
+def _extract_mvc_validation_messages(html: str) -> list[str]:
+    """Pull user-visible validation text from typical ASP.NET MVC markup."""
+    messages: list[str] = []
+    block = re.search(
+        r'class="[^"]*validation-summary-errors[^"]*"[^>]*>(.*?)</div>',
+        html,
+        re.I | re.DOTALL,
+    )
+    if block:
+        for li in re.finditer(r"<li[^>]*>([^<]+)</li>", block.group(1), re.I):
+            t = li.group(1).strip()
+            if t:
+                messages.append(t)
+    for m in re.finditer(
+        r'class="[^"]*field-validation-error[^"]*"[^>]*>([^<]+)',
+        html,
+        re.I,
+    ):
+        t = m.group(1).strip()
+        if t and t not in messages:
+            messages.append(t)
+    for m in re.finditer(
+        r'class="[^"]*(?:alert-danger|text-danger)[^"]*"[^>]*>([^<]+)',
+        html,
+        re.I,
+    ):
+        t = m.group(1).strip()
+        if t and len(t) < 500 and t not in messages:
+            messages.append(t)
+    return messages
 
 
 def _merge_lone_select(html: str, payload: dict[str, str]) -> None:
@@ -391,21 +428,33 @@ def handle_2fa(
 
     print(f"[auth] 2FA verification failed. Status {response.status_code}, url: {response.url}")
     final = response.url.lower()
+    body = response.text
+    msgs = _extract_mvc_validation_messages(body)
+    for msg in msgs:
+        print(f"[auth] Server message: {msg}")
+
     if "/account/login" in final:
         print(
             "[auth] Optimus sent you back to the login page. Common causes: wrong SMS code, "
             "code already used, or the 2FA step timed out. Request a new text and run "
             "login again within a minute or two."
         )
-    err = re.search(
-        r'class="[^"]*field-validation-error[^"]*"[^>]*>([^<]+)',
-        response.text,
-        re.I,
-    )
-    if err:
-        print(f"[auth] Server message: {err.group(1).strip()}")
-    if response.status_code >= 400 or OPTIMUS_DEBUG:
-        snippet = re.sub(r"\s+", " ", response.text[:1500])
+    elif "m2factorauth" in final or "factorauth" in final:
+        print(
+            "[auth] Still on the 2FA page — the code was rejected or a required field was missing. "
+            "Use a fresh SMS code, run login immediately, or set OPTIMUS_DEBUG=1 to inspect the response."
+        )
+        if not msgs:
+            err = re.search(
+                r'class="[^"]*field-validation-error[^"]*"[^>]*>([^<]+)',
+                body,
+                re.I,
+            )
+            if err:
+                print(f"[auth] Server message: {err.group(1).strip()}")
+
+    if response.status_code >= 400 or OPTIMUS_DEBUG or (not msgs and "m2factorauth" in final):
+        snippet = re.sub(r"\s+", " ", body[:3500])
         print(f"[auth] Response body (truncated): {snippet}")
     return False
 
