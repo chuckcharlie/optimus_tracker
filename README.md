@@ -22,24 +22,24 @@ Set these via `docker-compose.yml` or any orchestrator that injects environment 
 
 ### MQTT topics and payload
 
-Each vehicle is published under `{MQ_TOPIC_PREFIX}/{slug}`, where `slug` is derived from the Optimus device description (lowercase, non-alphanumeric become `-`). Example with `MQ_TOPIC_PREFIX=cars` and description `F350`:
+Each vehicle is published under `{MQ_TOPIC_PREFIX}/{slug}`, where `slug` is derived from the Optimus device description (lowercase, non-alphanumeric become `-`). Example with `MQ_TOPIC_PREFIX=cars` and description `Example Truck`:
 
-- **Topic:** `cars/f350`
-- **Payload:** single JSON object (one message per vehicle per publish), for example:
+- **Topic:** `cars/example-truck`
+- **Payload:** single JSON object (one message per vehicle per publish), for example (illustrative numbers only, not a real position):
 
 ```json
 {
-  "device_id": "867204061414314",
-  "description": "F350",
-  "latitude": 39.590474,
-  "longitude": -104.673608,
+  "device_id": "000000000000000",
+  "description": "Example Truck",
+  "latitude": 12.345678,
+  "longitude": -98.765432,
   "speed_mph": 0,
-  "azimuth": 0,
-  "altitude_ft": 1828.9,
-  "report_date": "/Date(1776340983000)/",
-  "report_date_utc": "2026-04-15T12:03:03+00:00",
-  "report_date_local": "2026-04-15T06:03:03-06:00",
-  "event": "GPS Signal OK",
+  "azimuth": 90,
+  "altitude_ft": 500.0,
+  "report_date": "/Date(1700000000000)/",
+  "report_date_utc": "2023-11-14T22:13:20+00:00",
+  "report_date_local": "2023-11-14T15:13:20-07:00",
+  "event": "Parked",
   "signal": 1,
   "idling": false
 }
