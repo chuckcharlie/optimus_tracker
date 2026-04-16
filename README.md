@@ -8,7 +8,7 @@ Image and release versions are read from `version.txt` (single line, for example
 
 ## Configuration
 
-Set these via `docker-compose.yml` (same pattern as the `awspaghetti` project in this workspace) or any orchestrator that injects environment variables.
+Set these via `docker-compose.yml` or any orchestrator that injects environment variables into the container.
 
 | Variable | Description | Required | Example |
 |----------|-------------|----------|---------|
@@ -19,6 +19,33 @@ Set these via `docker-compose.yml` (same pattern as the `awspaghetti` project in
 | `MQ_TOPIC_PREFIX` | Topic prefix before vehicle slug | No | `cars` → topic `cars/f350` |
 | `INTERVAL_SECONDS` | Seconds between poll loops | No | `10` |
 | `OPTIMUS_DEVICE_ID` | Login form `DeviceId` fingerprint | No | default in `app.py` |
+
+### MQTT topics and payload
+
+Each vehicle is published under `{MQ_TOPIC_PREFIX}/{slug}`, where `slug` is derived from the Optimus device description (lowercase, non-alphanumeric become `-`). Example with `MQ_TOPIC_PREFIX=cars` and description `F350`:
+
+- **Topic:** `cars/f350`
+- **Payload:** single JSON object (one message per vehicle per publish), for example:
+
+```json
+{
+  "device_id": "867204061414314",
+  "description": "F350",
+  "latitude": 39.590474,
+  "longitude": -104.673608,
+  "speed_mph": 0,
+  "azimuth": 0,
+  "altitude_ft": 1828.9,
+  "report_date": "/Date(1776340983000)/",
+  "report_date_utc": "2026-04-15T12:03:03+00:00",
+  "report_date_local": "2026-04-15T06:03:03-06:00",
+  "event": "GPS Signal OK",
+  "signal": 1,
+  "idling": false
+}
+```
+
+Values mirror Optimus `LastPosition` fields where present; `report_date_*` may be `null` if the vendor date string cannot be parsed.
 
 ### Session refresh and SMS 2FA
 
