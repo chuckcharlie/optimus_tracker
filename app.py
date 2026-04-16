@@ -6,8 +6,17 @@ Container-friendly Optimus checker.
 - Fetches latest positions
 - Publishes to MQTT topic cars/<name>
 - Skips MQTT publish when lat/lon did not change per device
+
+Refresh session (including SMS 2FA) inside the running container:
+
+    docker exec -it optimus-checker python /app/app.py login
+
+Non-interactive SMS code:
+
+    docker exec optimus-checker python /app/app.py login --code 123456
 """
 
+import argparse
 import json
 import os
 import re
@@ -48,6 +57,7 @@ def load_session(session: requests.Session) -> bool:
 
 
 def save_session(session: requests.Session) -> None:
+    os.makedirs(os.path.dirname(SESSION_FILE) or ".", exist_ok=True)
     cookies = {c.name: c.value for c in session.cookies}
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(cookies, f)
@@ -66,7 +76,79 @@ def session_is_valid(session: requests.Session) -> bool:
     return False
 
 
-def login(session: requests.Session) -> bool:
+def _two_factor_url(response: requests.Response) -> str | None:
+    url = response.url.lower()
+    if "verify" in url or "twofactor" in url or "code" in url:
+        return response.url
+    return None
+
+
+def handle_2fa(session: requests.Session, two_factor_url: str, code: str) -> bool:
+    payload = {"Code": code}
+    response = session.post(two_factor_url, data=payload, allow_redirects=True, timeout=15)
+    if session_is_valid(session):
+        print("[auth] 2FA verified, login successful.")
+        save_session(session)
+        return True
+    print(f"[auth] 2FA verification failed. Status {response.status_code}, url: {response.url}")
+    return False
+
+
+def _read_sms_code(cli_code: str | None) -> str | None:
+    if cli_code:
+        return cli_code.strip()
+    env_code = os.environ.get("OPTIMUS_SMS_CODE", "").strip()
+    if env_code:
+        return env_code
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        if line:
+            return line.strip()
+        return None
+    try:
+        return input("[auth] Enter the SMS verification code: ").strip()
+    except EOFError:
+        return None
+
+
+def login_interactive(session: requests.Session, sms_code: str | None = None) -> bool:
+    """
+    Full login; prompts for SMS or uses --code / OPTIMUS_SMS_CODE / stdin line.
+    """
+    if not USERNAME or not PASSWORD:
+        print("[error] Set OPTIMUS_USER and OPTIMUS_PASS in environment.")
+        return False
+
+    print("[auth] Logging in (interactive)...")
+    payload = {
+        "DeviceId": DEVICE_ID,
+        "Username": USERNAME,
+        "Password": PASSWORD,
+    }
+    response = session.post(LOGIN_URL, data=payload, allow_redirects=True, timeout=15)
+    two_factor = _two_factor_url(response)
+
+    if two_factor:
+        print("[auth] SMS 2FA required.")
+        code = _read_sms_code(sms_code)
+        if not code:
+            print("[error] No SMS code provided. Use one of:")
+            print("  docker exec -it optimus-checker python /app/app.py login")
+            print("  docker exec optimus-checker python /app/app.py login --code 123456")
+            print("  docker exec -i optimus-checker sh -c 'printf \"%s\\n\" 123456 | python /app/app.py login'")
+            return False
+        return handle_2fa(session, two_factor, code)
+
+    if session_is_valid(session):
+        print("[auth] Login successful.")
+        save_session(session)
+        return True
+
+    print(f"[auth] Login failed. Status {response.status_code}, landed at: {response.url}")
+    return False
+
+
+def login_noninteractive(session: requests.Session) -> bool:
     if not USERNAME or not PASSWORD:
         print("[error] Set OPTIMUS_USER and OPTIMUS_PASS in environment.")
         return False
@@ -79,8 +161,10 @@ def login(session: requests.Session) -> bool:
     }
     response = session.post(LOGIN_URL, data=payload, allow_redirects=True, timeout=15)
 
-    if "verify" in response.url.lower() or "twofactor" in response.url.lower() or "code" in response.url.lower():
-        print("[error] 2FA required. Container mode is non-interactive.")
+    if _two_factor_url(response):
+        print("[error] SMS 2FA required. Refresh session with:")
+        print("  docker exec -it optimus-checker python /app/app.py login")
+        print("  docker exec optimus-checker python /app/app.py login --code 'CODE'")
         return False
 
     if session_is_valid(session):
@@ -90,6 +174,29 @@ def login(session: requests.Session) -> bool:
 
     print(f"[auth] Login failed. Status {response.status_code}, landed at: {response.url}")
     return False
+
+
+def build_http_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer": BASE_URL,
+        }
+    )
+    return session
+
+
+def cmd_login(sms_code: str | None) -> int:
+    """CLI entry: obtain a new session cookie (handles 2FA)."""
+    session = build_http_session()
+    if login_interactive(session, sms_code=sms_code):
+        return 0
+    return 1
 
 
 def get_devices(session: requests.Session) -> dict:
@@ -205,17 +312,7 @@ def publish_positions(positions: list[dict]) -> None:
 
 
 def run_once() -> int:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer": BASE_URL,
-        }
-    )
+    session = build_http_session()
 
     loaded = load_session(session)
     if loaded and session_is_valid(session):
@@ -223,7 +320,7 @@ def run_once() -> int:
     else:
         if loaded:
             print("[auth] Saved session has expired, re-authenticating.")
-        if not login(session):
+        if not login_noninteractive(session):
             print("[error] Could not authenticate.")
             return 1
 
@@ -240,5 +337,25 @@ def run_once() -> int:
     return 0
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Optimus tracker MQTT poller")
+    sub = parser.add_subparsers(dest="command")
+
+    login_p = sub.add_parser("login", help="Refresh Optimus session cookie (SMS 2FA supported)")
+    login_p.add_argument(
+        "--code",
+        metavar="SMS",
+        help="SMS verification code (omit for prompt, or use with -it)",
+    )
+
+    sub.add_parser("poll", help="Run a single fetch/publish cycle (default)")
+
+    args = parser.parse_args()
+
+    if args.command == "login":
+        return cmd_login(args.code)
+    return run_once()
+
+
 if __name__ == "__main__":
-    sys.exit(run_once())
+    sys.exit(main())

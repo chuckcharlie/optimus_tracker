@@ -19,8 +19,41 @@ Set these via `docker-compose.yml` (same pattern as the `awspaghetti` project in
 | `MQ_TOPIC_PREFIX` | Topic prefix before vehicle slug | No | `cars` → topic `cars/f350` |
 | `INTERVAL_SECONDS` | Seconds between poll loops | No | `10` |
 | `OPTIMUS_DEVICE_ID` | Login form `DeviceId` fingerprint | No | default in `app.py` |
+| `OPTIMUS_SMS_CODE` | SMS code for `login` when not using `-it` / `--code` | No | only for one-off `login` |
 
-**2FA:** Container mode does not support interactive SMS codes. If Optimus forces 2FA, login will fail until you complete 2FA out-of-band or refresh session handling.
+### Session refresh and SMS 2FA
+
+The background loop uses non-interactive login. If Optimus requires SMS 2FA, the poll will log an error until you refresh cookies.
+
+Run **`login`** inside the **same** container (it reads `OPTIMUS_USER` / `OPTIMUS_PASS` from the container environment and writes `/data/optimus_session.json`):
+
+**Interactive (prompt for SMS code):**
+
+```bash
+docker exec -it optimus-checker python /app/app.py login
+```
+
+**Pass the code on the command line:**
+
+```bash
+docker exec optimus-checker python /app/app.py login --code 123456
+```
+
+**Pipe the code (no TTY):**
+
+```bash
+printf '%s\n' 123456 | docker exec -i optimus-checker python /app/app.py login
+```
+
+**Environment variable (one line):**
+
+```bash
+docker exec -e OPTIMUS_SMS_CODE=123456 optimus-checker python /app/app.py login
+```
+
+Replace `optimus-checker` with your `container_name` from `docker-compose.yml` if different.
+
+Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no arguments the app does the same (used by the entrypoint loop).
 
 ## Local run (build from source)
 
