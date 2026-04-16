@@ -111,7 +111,15 @@ def session_is_valid(session: requests.Session) -> bool:
 
 def _two_factor_url(response: requests.Response) -> str | None:
     url = response.url.lower()
-    if "verify" in url or "twofactor" in url or "code" in url:
+    # Optimus has used routes like /Account/M2FactorAuth for SMS flows.
+    # Detect broader 2FA patterns so login --code works reliably.
+    if (
+        "verify" in url
+        or "twofactor" in url
+        or "2factor" in url
+        or "factorauth" in url
+        or "code" in url
+    ):
         return response.url
     return None
 
