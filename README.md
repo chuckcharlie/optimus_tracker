@@ -21,7 +21,6 @@ Set these via `docker-compose.yml` or any orchestrator that injects environment 
 | `OPTIMUS_DEVICE_ID` | Optional override for login `DeviceId` fingerprint | No | UUID string |
 | `OPTIMUS_PLATFORM` | Hidden `Platform` on SMS 2FA form if empty in HTML | No | `Web` |
 | `OPTIMUS_DEBUG` | Verbose auth logging | No | `1` or `true` |
-| `OPTIMUS_TIMEZONE` | IANA timezone for `report_date_local` in JSON/MQTT | No | `America/Denver` |
 
 ### MQTT topics and payload
 
@@ -39,16 +38,15 @@ Each vehicle is published under `{MQ_TOPIC_PREFIX}/{slug}`, where `slug` is deri
   "speed_mph": 0,
   "azimuth": 90,
   "altitude_ft": 500.0,
-  "report_date": "/Date(1700000000000)/",
-  "report_date_utc": "2023-11-14T22:13:20+00:00",
-  "report_date_local": "2023-11-14T15:13:20-07:00",
+  "report_date": 1700000000000,
+  "report_date_local": "2023-11-14T22:13:20",
   "event": "Parked",
   "signal": 1,
   "idling": false
 }
 ```
 
-Values mirror Optimus `LastPosition` fields where present; `report_date_*` may be `null` if the vendor date string cannot be parsed.
+Values mirror Optimus `LastPosition` fields where present; `report_date_local` may be `null` if the vendor date string cannot be parsed.
 
 ### Session refresh and SMS 2FA
 

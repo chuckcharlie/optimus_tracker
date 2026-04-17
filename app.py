@@ -22,8 +22,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -45,8 +44,6 @@ MQ_TOPIC_PREFIX = os.environ.get("MQ_TOPIC_PREFIX", "cars").strip("/") or "cars"
 OPTIMUS_DEBUG = os.environ.get("OPTIMUS_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # Optimus M2FactorAuth form leaves these empty in HTML (browser JS fills them). Must match login POST.
 OPTIMUS_PLATFORM = os.environ.get("OPTIMUS_PLATFORM", "Web").strip() or "Web"
-# IANA name for report_date_local (e.g. America/Denver). Empty = container/host local time.
-OPTIMUS_TIMEZONE = os.environ.get("OPTIMUS_TIMEZONE", "").strip()
 # Single source of truth with build_http_session() — hidden field "UserAgent" must align.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -593,33 +590,21 @@ def get_devices(session: requests.Session) -> dict:
     return response.json()
 
 
-def _timezone_for_report_local():
-    """ZoneInfo from OPTIMUS_TIMEZONE, or None to use system local time."""
-    if not OPTIMUS_TIMEZONE:
-        return None
-    try:
-        return ZoneInfo(OPTIMUS_TIMEZONE)
-    except Exception as exc:
-        if not getattr(_timezone_for_report_local, "_warned", False):
-            print(
-                f"[data] Invalid OPTIMUS_TIMEZONE={OPTIMUS_TIMEZONE!r}: {exc}; "
-                "using system local time for report_date_local."
-            )
-            _timezone_for_report_local._warned = True
-        return None
-
-
-def parse_report_date(raw_value: str | None) -> tuple[str | None, str | None]:
+def parse_report_date_ms(raw_value: str | None) -> int | None:
+    """
+    Optimus sends ASP.NET JSON dates like /Date(1776419940000)/ (milliseconds since epoch).
+    """
     if not isinstance(raw_value, str):
-        return None, None
+        return None
     match = re.search(r"/Date\((\d+)(?:[+-]\d+)?\)/", raw_value)
     if not match:
-        return None, None
-    epoch_ms = int(match.group(1))
-    dt_utc = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-    tz = _timezone_for_report_local()
-    dt_local = dt_utc.astimezone(tz) if tz is not None else dt_utc.astimezone()
-    return dt_utc.isoformat(), dt_local.isoformat()
+        return None
+    return int(match.group(1))
+
+
+def report_date_local_from_ms(epoch_ms: int) -> str:
+    # Vendor clock value; no timezone conversion (see prior behavior).
+    return datetime.utcfromtimestamp(epoch_ms / 1000).isoformat()
 
 
 def extract_positions(devices: dict) -> list[dict]:
@@ -629,7 +614,8 @@ def extract_positions(devices: dict) -> list[dict]:
         if not last_position:
             continue
         raw_report_date = last_position.get("ReportDate")
-        report_date_utc, report_date_local = parse_report_date(raw_report_date)
+        epoch_ms = parse_report_date_ms(raw_report_date)
+        report_date_local = report_date_local_from_ms(epoch_ms) if epoch_ms is not None else None
         positions.append(
             {
                 "device_id": device_id,
@@ -639,8 +625,7 @@ def extract_positions(devices: dict) -> list[dict]:
                 "speed_mph": last_position.get("Speed"),
                 "azimuth": last_position.get("Azimuth"),
                 "altitude_ft": last_position.get("Altitude"),
-                "report_date": raw_report_date,
-                "report_date_utc": report_date_utc,
+                "report_date": epoch_ms,
                 "report_date_local": report_date_local,
                 "event": last_position.get("Event"),
                 "signal": last_position.get("Signal"),
