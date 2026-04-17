@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -603,8 +603,9 @@ def parse_report_date_ms(raw_value: str | None) -> int | None:
 
 
 def report_date_local_from_ms(epoch_ms: int) -> str:
-    # Vendor clock value; no timezone conversion (see prior behavior).
-    return datetime.utcfromtimestamp(epoch_ms / 1000).isoformat()
+    # Vendor clock value; no extra offset conversion. Naive ISO string matches former utcfromtimestamp output.
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    return dt.replace(tzinfo=None).isoformat()
 
 
 def extract_positions(devices: dict) -> list[dict]:
