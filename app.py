@@ -109,14 +109,24 @@ def get_device_id() -> str:
     return generated
 
 
-def session_is_valid(session: requests.Session) -> bool:
+def session_is_valid(session: requests.Session) -> bool | None:
+    """
+    True  = session cookies work.
+    False = server rejected (need to re-auth).
+    None  = network error / timeout; status unknown, caller should NOT re-auth
+            (re-auth triggers a fresh SMS 2FA even when cookies are still good).
+    """
     try:
         response = session.post(GET_DEVICES_URL, timeout=10)
-        if response.status_code == 200:
+    except requests.RequestException as exc:
+        print(f"[auth] Session check network error: {exc}")
+        return None
+    if response.status_code == 200:
+        try:
             data = response.json()
-            return isinstance(data, dict) and len(data) > 0
-    except Exception:
-        pass
+        except ValueError:
+            return False
+        return isinstance(data, dict) and len(data) > 0
     return False
 
 
@@ -444,7 +454,7 @@ def handle_2fa(
         allow_redirects=True,
         timeout=15,
     )
-    if session_is_valid(session):
+    if session_is_valid(session) is True:
         print("[auth] 2FA verified, login successful.")
         save_session(session)
         return True
@@ -527,7 +537,7 @@ def login_interactive(session: requests.Session, sms_code: str | None = None) ->
             return False
         return handle_2fa(session, two_factor, code, login_response=response)
 
-    if session_is_valid(session):
+    if session_is_valid(session) is True:
         print("[auth] Login successful.")
         save_session(session)
         return True
@@ -548,7 +558,11 @@ def login_noninteractive(session: requests.Session) -> bool:
         "Username": USERNAME,
         "Password": PASSWORD,
     }
-    response = session.post(LOGIN_URL, data=payload, allow_redirects=True, timeout=15)
+    try:
+        response = session.post(LOGIN_URL, data=payload, allow_redirects=True, timeout=15)
+    except requests.RequestException as exc:
+        print(f"[auth] Login request failed: {exc}")
+        return False
 
     if _two_factor_url(response):
         print("[error] SMS 2FA required. Refresh session with:")
@@ -556,7 +570,7 @@ def login_noninteractive(session: requests.Session) -> bool:
         print("  docker exec optimus-checker python /app/app.py login --code 'CODE'")
         return False
 
-    if session_is_valid(session):
+    if session_is_valid(session) is True:
         print("[auth] Login successful.")
         save_session(session)
         return True
@@ -706,8 +720,13 @@ def run_once() -> int:
     session = build_http_session()
 
     loaded = load_session(session)
-    if loaded and session_is_valid(session):
+    validity = session_is_valid(session) if loaded else False
+    if validity is True:
         print("[auth] Saved session is still valid, skipping login.")
+    elif validity is None:
+        # Network blip during the check: do NOT try to log in (would spam SMS 2FA).
+        print("[auth] Could not verify saved session (network error); skipping this cycle.")
+        return 0
     else:
         if loaded:
             print("[auth] Saved session has expired, re-authenticating.")
@@ -716,7 +735,11 @@ def run_once() -> int:
             return 1
 
     print("[data] Fetching device positions...")
-    devices = get_devices(session)
+    try:
+        devices = get_devices(session)
+    except requests.RequestException as exc:
+        print(f"[data] Fetch failed: {exc}; skipping this cycle.")
+        return 0
     positions = extract_positions(devices)
     if not positions:
         print("[data] No positions returned.")
