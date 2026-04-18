@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -35,6 +36,13 @@ GET_DEVICES_URL = f"{BASE_URL}/Home/GetDevices"
 SESSION_FILE = "/data/optimus_session.json"
 MQ_STATE_FILE = "/data/optimus_mq_state.json"
 DEVICE_ID_FILE = "/data/optimus_device_id.txt"
+# Marker written when SMS 2FA is required. While present we make ZERO requests
+# to Optimus (avoid account lockout). Cleared by a successful `login` command.
+TWOFA_PENDING_FILE = "/data/optimus_2fa_pending"
+# How often to re-log the "2FA pending" idle line (seconds).
+TWOFA_PENDING_LOG_INTERVAL = 5 * 60
+# Sleep between the first False session check and the confirmation retry.
+SESSION_RECHECK_DELAY_SECONDS = 2
 
 USERNAME = os.environ.get("OPTIMUS_USER", "")
 PASSWORD = os.environ.get("OPTIMUS_PASS", "")
@@ -111,23 +119,127 @@ def get_device_id() -> str:
 
 def session_is_valid(session: requests.Session) -> bool | None:
     """
-    True  = session cookies work.
-    False = server rejected (need to re-auth).
-    None  = network error / timeout; status unknown, caller should NOT re-auth
-            (re-auth triggers a fresh SMS 2FA even when cookies are still good).
+    True  = cookies work.
+    False = server *clearly* says we're logged out (auth failure / login redirect /
+            HTML login page). Caller may re-auth.
+    None  = ambiguous / transient (network error, 5xx, unexpected status). Caller
+            MUST NOT re-auth — that would post credentials and trigger a new
+            SMS 2FA when our session is most likely still fine.
     """
     try:
-        response = session.post(GET_DEVICES_URL, timeout=10)
+        response = session.post(GET_DEVICES_URL, timeout=10, allow_redirects=False)
     except requests.RequestException as exc:
-        print(f"[auth] Session check network error: {exc}")
+        print(f"[auth] Session check: network error: {exc}")
         return None
-    if response.status_code == 200:
-        try:
-            data = response.json()
-        except ValueError:
+
+    status = response.status_code
+    location = response.headers.get("Location", "") or ""
+    ctype = (response.headers.get("Content-Type", "") or "").lower()
+
+    if status in (301, 302, 303, 307, 308):
+        if "login" in location.lower() or "account" in location.lower():
+            print(f"[auth] Session check: redirect to login ({status} -> {location}).")
             return False
-        return isinstance(data, dict) and len(data) > 0
-    return False
+        print(f"[auth] Session check: unexpected redirect {status} -> {location}; treating as unknown.")
+        return None
+
+    if status in (401, 403):
+        print(f"[auth] Session check: HTTP {status} (auth rejected).")
+        return False
+
+    if 500 <= status < 600:
+        print(f"[auth] Session check: HTTP {status} (server error); treating as unknown.")
+        return None
+
+    if status != 200:
+        print(f"[auth] Session check: unexpected HTTP {status}; treating as unknown.")
+        return None
+
+    if "json" not in ctype:
+        body_len = len(response.content)
+        print(f"[auth] Session check: 200 with non-JSON body (content-type={ctype!r}, {body_len} bytes); likely login page.")
+        return False
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        print(f"[auth] Session check: 200 but JSON parse failed: {exc}; treating as unknown.")
+        return None
+
+    if not isinstance(data, dict):
+        print(f"[auth] Session check: 200 with unexpected JSON shape ({type(data).__name__}); treating as unknown.")
+        return None
+
+    return True
+
+
+def is_2fa_pending() -> bool:
+    return os.path.exists(TWOFA_PENDING_FILE)
+
+
+def _read_2fa_pending() -> dict:
+    try:
+        with open(TWOFA_PENDING_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _write_2fa_pending(payload: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(TWOFA_PENDING_FILE) or ".", exist_ok=True)
+        with open(TWOFA_PENDING_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.chmod(TWOFA_PENDING_FILE, 0o600)
+    except OSError as exc:
+        print(f"[auth] Could not write 2FA pending marker: {exc}")
+
+
+def set_2fa_pending(reason: str = "") -> None:
+    if is_2fa_pending():
+        return  # already pending; preserve original set_at and last_logged_at
+    _write_2fa_pending({"set_at": int(time.time()), "reason": reason, "last_logged_at": 0})
+
+
+def clear_2fa_pending() -> None:
+    try:
+        os.remove(TWOFA_PENDING_FILE)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"[auth] Could not remove 2FA pending marker: {exc}")
+        return
+    print(f"[auth] Cleared 2FA pending marker ({TWOFA_PENDING_FILE}).")
+
+
+def _maybe_log_2fa_pending() -> None:
+    """Print the 'pending' line at most once per TWOFA_PENDING_LOG_INTERVAL.
+
+    State is persisted in the marker file so the throttle survives the
+    one-process-per-cycle entrypoint loop.
+    """
+    state = _read_2fa_pending()
+    now = int(time.time())
+    last_logged = state.get("last_logged_at") or 0
+    if not isinstance(last_logged, (int, float)):
+        last_logged = 0
+    if now - int(last_logged) < TWOFA_PENDING_LOG_INTERVAL:
+        return
+    set_at = state.get("set_at")
+    if isinstance(set_at, (int, float)):
+        age = max(0, now - int(set_at))
+        suffix = f" (pending for {age}s)"
+    else:
+        suffix = ""
+    print(
+        f"[auth] 2FA verification pending{suffix}; skipping all Optimus calls. "
+        "Run: docker exec -it optimus-tracker python /app/app.py login"
+    )
+    state["last_logged_at"] = now
+    _write_2fa_pending(state)
 
 
 class _MultiFormParser(HTMLParser):
@@ -565,9 +677,10 @@ def login_noninteractive(session: requests.Session) -> bool:
         return False
 
     if _two_factor_url(response):
-        print("[error] SMS 2FA required. Refresh session with:")
-        print("  docker exec -it optimus-checker python /app/app.py login")
-        print("  docker exec optimus-checker python /app/app.py login --code 'CODE'")
+        print("[error] SMS 2FA required. Pausing background polls until verification.")
+        print("  Run interactively to get a fresh SMS and enter the code:")
+        print("    docker exec -it optimus-tracker python /app/app.py login")
+        set_2fa_pending(reason="login_noninteractive: 2FA required")
         return False
 
     if session_is_valid(session) is True:
@@ -594,6 +707,7 @@ def cmd_login(sms_code: str | None) -> int:
     """CLI entry: obtain a new session cookie (handles 2FA)."""
     session = build_http_session()
     if login_interactive(session, sms_code=sms_code):
+        clear_2fa_pending()
         return 0
     return 1
 
@@ -717,22 +831,47 @@ def publish_positions(positions: list[dict]) -> None:
 
 
 def run_once() -> int:
+    if is_2fa_pending():
+        # Hard stop: do not contact Optimus at all while a verification is owed.
+        # Avoids triggering more SMS codes and potential account lockout.
+        _maybe_log_2fa_pending()
+        return 0
+
     session = build_http_session()
 
     loaded = load_session(session)
-    validity = session_is_valid(session) if loaded else False
-    if validity is True:
-        print("[auth] Saved session is still valid, skipping login.")
-    elif validity is None:
-        # Network blip during the check: do NOT try to log in (would spam SMS 2FA).
-        print("[auth] Could not verify saved session (network error); skipping this cycle.")
-        return 0
-    else:
-        if loaded:
-            print("[auth] Saved session has expired, re-authenticating.")
+    if not loaded:
+        # No cookies on disk → we have to log in. This is the only path that
+        # legitimately POSTs credentials without a prior session.
         if not login_noninteractive(session):
             print("[error] Could not authenticate.")
             return 1
+    else:
+        validity = session_is_valid(session)
+        if validity is None:
+            # Ambiguous (network error, 5xx, weird redirect). Don't re-auth.
+            print("[auth] Session check inconclusive; skipping this cycle.")
+            return 0
+        if validity is False:
+            # Confirm with one quick retry before pulling the SMS trigger.
+            print(
+                f"[auth] Session check said invalid; rechecking in "
+                f"{SESSION_RECHECK_DELAY_SECONDS}s before re-authenticating."
+            )
+            time.sleep(SESSION_RECHECK_DELAY_SECONDS)
+            validity = session_is_valid(session)
+            if validity is None:
+                print("[auth] Recheck inconclusive; skipping this cycle.")
+                return 0
+            if validity is False:
+                print("[auth] Saved session has expired, re-authenticating.")
+                if not login_noninteractive(session):
+                    print("[error] Could not authenticate.")
+                    return 1
+            else:
+                print("[auth] Recheck succeeded; saved session is still valid.")
+        else:
+            print("[auth] Saved session is still valid, skipping login.")
 
     print("[data] Fetching device positions...")
     try:

@@ -50,23 +50,27 @@ Values mirror Optimus `LastPosition` fields where present; `report_date_local` m
 
 ### Session refresh and SMS 2FA
 
-The background loop uses non-interactive login. If Optimus requires SMS 2FA, the poll will log an error until you refresh cookies.
+The background loop uses non-interactive login. When Optimus requires SMS 2FA, the poller writes a marker file (`/data/optimus_2fa_pending`) and then **stops contacting Optimus entirely** — no session checks, no fetches — until you verify. This avoids generating extra SMS codes and reduces account-lockout risk. While in this state the loop logs a single reminder line every 5 minutes.
 
-Run **`login`** inside the **same** container (it reads `OPTIMUS_USER` / `OPTIMUS_PASS` from the container environment and writes `/data/optimus_session.json`):
+Clear the lockout by running `login` inside the same container (it reads `OPTIMUS_USER` / `OPTIMUS_PASS` from the container environment and writes `/data/optimus_session.json`). Each `login` invocation triggers a **fresh** SMS code, so if you were too slow with the first one, just run it again.
 
-**Interactive (prompt for SMS code):**
-
-```bash
-docker exec -it optimus-checker python /app/app.py login
-```
-
-**Pass the code on the command line:**
+**Interactive (recommended — prompts for SMS, you can wait as long as you need):**
 
 ```bash
-docker exec optimus-checker python /app/app.py login --code 123456
+docker exec -it optimus-tracker python /app/app.py login
 ```
 
-Replace `optimus-checker` with your `container_name` from `docker-compose.yml` if different.
+**Pass the code on the command line (only if you already have one in hand):**
+
+```bash
+docker exec optimus-tracker python /app/app.py login --code 123456
+```
+
+> Note: `--code` also re-POSTs credentials, which usually invalidates any code already sitting in your SMS inbox. Prefer the interactive form.
+
+On success, `login` saves cookies and removes `/data/optimus_2fa_pending`, and the background loop resumes on its next tick.
+
+Replace `optimus-tracker` with your `container_name` from `docker-compose.yml` if different.
 
 Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no arguments the app does the same (used by the entrypoint loop).
 
@@ -77,3 +81,4 @@ Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no a
 - `optimus_session.json` — session cookies
 - `optimus_mq_state.json` — last published coordinates for de-duplication
 - `optimus_device_id.txt` — auto-generated persistent login `DeviceId` (unless `OPTIMUS_DEVICE_ID` is set)
+- `optimus_2fa_pending` — present while SMS 2FA verification is owed; the poll loop is idle until you run `login`. Removing this file by hand resumes polling but the next failure will recreate it.
