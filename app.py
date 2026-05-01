@@ -75,13 +75,39 @@ def load_session(session: requests.Session) -> bool:
         return False
 
 
-def save_session(session: requests.Session) -> None:
+def _write_session_cookies(session: requests.Session) -> None:
     os.makedirs(os.path.dirname(SESSION_FILE) or ".", exist_ok=True)
     cookies = {c.name: c.value for c in session.cookies}
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(cookies, f)
     os.chmod(SESSION_FILE, 0o600)
+
+
+def save_session(session: requests.Session) -> None:
+    _write_session_cookies(session)
     print(f"[auth] Session saved to {SESSION_FILE}")
+
+
+def persist_rotated_cookies(session: requests.Session, before: dict[str, str]) -> None:
+    """
+    Mirror in-memory cookies to disk after every authenticated request. Two reasons:
+
+    1. If Optimus ever rolls its `loginCookies` blob on a response (sliding refresh),
+       capture the new value so the next process invocation doesn't reload a stale one.
+    2. Locally seeded cookies that aren't yet in the saved file (e.g. `_deviceID`) get
+       persisted on first cycle without needing a special bootstrap path.
+    """
+    _write_session_cookies(session)
+    if not OPTIMUS_DEBUG:
+        return
+    after = {c.name: c.value for c in session.cookies}
+    changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
+    if changed:
+        print(f"[auth] debug: cookie jar changed: {changed}")
+
+
+def snapshot_cookies(session: requests.Session) -> dict[str, str]:
+    return {c.name: c.value for c in session.cookies}
 
 
 def get_device_id() -> str:
@@ -692,6 +718,25 @@ def login_noninteractive(session: requests.Session) -> bool:
     return False
 
 
+def ensure_device_id_cookie(session: requests.Session) -> None:
+    """
+    Mirror the browser's `_deviceID` cookie. Optimus's login page (`/Account/Login`)
+    runs inline JS that generates a UUID, stores it as a 15-day `_deviceID` cookie,
+    and copies the same value into the hidden `DeviceId` form field before submit.
+
+    The script has always sent the form field, but never the cookie. Empirically the
+    server's trusted-device / 2FA-bypass logic appears to require both to match a
+    previously verified device — without the cookie every fresh session looks like
+    a brand-new browser, which forces SMS on every re-auth at the 48h session cap.
+    """
+    session.cookies.set(
+        "_deviceID",
+        get_device_id(),
+        domain="www.optimustracking.com",
+        path="/",
+    )
+
+
 def build_http_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -700,6 +745,7 @@ def build_http_session() -> requests.Session:
             "Referer": BASE_URL,
         }
     )
+    ensure_device_id_cookie(session)
     return session
 
 
@@ -840,6 +886,10 @@ def run_once() -> int:
     session = build_http_session()
 
     loaded = load_session(session)
+    # build_http_session already seeded _deviceID, but load_session may have
+    # overwritten it with whatever's on disk. Pin it back to the canonical local
+    # DeviceId so cookie and form field always agree.
+    ensure_device_id_cookie(session)
     if not loaded:
         # No cookies on disk → we have to log in. This is the only path that
         # legitimately POSTs credentials without a prior session.
@@ -847,6 +897,7 @@ def run_once() -> int:
             print("[error] Could not authenticate.")
             return 1
     else:
+        before = snapshot_cookies(session)
         validity = session_is_valid(session)
         if validity is None:
             # Ambiguous (network error, 5xx, weird redirect). Don't re-auth.
@@ -859,6 +910,7 @@ def run_once() -> int:
                 f"{SESSION_RECHECK_DELAY_SECONDS}s before re-authenticating."
             )
             time.sleep(SESSION_RECHECK_DELAY_SECONDS)
+            before = snapshot_cookies(session)
             validity = session_is_valid(session)
             if validity is None:
                 print("[auth] Recheck inconclusive; skipping this cycle.")
@@ -870,15 +922,19 @@ def run_once() -> int:
                     return 1
             else:
                 print("[auth] Recheck succeeded; saved session is still valid.")
+                persist_rotated_cookies(session, before)
         else:
             print("[auth] Saved session is still valid, skipping login.")
+            persist_rotated_cookies(session, before)
 
     print("[data] Fetching device positions...")
+    before = snapshot_cookies(session)
     try:
         devices = get_devices(session)
     except requests.RequestException as exc:
         print(f"[data] Fetch failed: {exc}; skipping this cycle.")
         return 0
+    persist_rotated_cookies(session, before)
     positions = extract_positions(devices)
     if not positions:
         print("[data] No positions returned.")
