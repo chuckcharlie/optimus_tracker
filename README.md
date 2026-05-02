@@ -78,7 +78,8 @@ Optional: `python /app/app.py poll` runs a single fetch/publish cycle; with no a
 
 `./data` on the host is mounted to `/data` in the container. It stores:
 
-- `optimus_session.json` — session cookies
-- `optimus_mq_state.json` — last published coordinates for de-duplication
-- `optimus_device_id.txt` — auto-generated persistent login `DeviceId` (unless `OPTIMUS_DEVICE_ID` is set)
+- `optimus_session.json` — session cookies (rewritten every cycle so any server-side cookie rotation persists across restarts)
+- `optimus_device_id.txt` — auto-generated persistent login `DeviceId` (unless `OPTIMUS_DEVICE_ID` is set). The same UUID is also sent as the browser-style `_deviceID` cookie so Optimus's trusted-device logic can recognise the script across re-auths.
 - `optimus_2fa_pending` — present while SMS 2FA verification is owed; the poll loop is idle until you run `login`. Removing this file by hand resumes polling but the next failure will recreate it.
+
+De-duplication of MQTT publishes is done against the broker's own retained message for each `cars/<slug>` topic — there's no local state file. On startup the script subscribes briefly to its target topics, reads any retained payload, and only publishes when the new latitude/longitude differ from the retained value. A fresh broker (or a topic that's never been published) always gets the next position.

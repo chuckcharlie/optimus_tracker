@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -34,7 +35,6 @@ BASE_URL = "https://www.optimustracking.com"
 LOGIN_URL = f"{BASE_URL}/Account/Login"
 GET_DEVICES_URL = f"{BASE_URL}/Home/GetDevices"
 SESSION_FILE = "/data/optimus_session.json"
-MQ_STATE_FILE = "/data/optimus_mq_state.json"
 DEVICE_ID_FILE = "/data/optimus_device_id.txt"
 # Marker written when SMS 2FA is required. While present we make ZERO requests
 # to Optimus (avoid account lockout). Cleared by a successful `login` command.
@@ -815,64 +815,79 @@ def topic_from_name(name: str) -> str:
     return slug or "unknown"
 
 
-def load_publish_state() -> dict[str, dict[str, float | None]]:
-    if not os.path.exists(MQ_STATE_FILE):
-        return {}
+def _retained_location(payload: bytes) -> tuple[object, object]:
+    """Pull (latitude, longitude) out of a retained JSON payload, or (None, None)."""
     try:
-        with open(MQ_STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {}
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        return (None, None)
+    if not isinstance(data, dict):
+        return (None, None)
+    return (data.get("latitude"), data.get("longitude"))
 
 
-def save_publish_state(state: dict[str, dict[str, float | None]]) -> None:
-    with open(MQ_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    os.chmod(MQ_STATE_FILE, 0o600)
-
-
-def location_key(position: dict) -> dict[str, float | None]:
-    return {"latitude": position.get("latitude"), "longitude": position.get("longitude")}
+# How long to wait after subscribe for the broker to deliver retained messages.
+# Local broker round-trip is sub-100ms; 2s is generous and bounds worst-case latency.
+RETAINED_FETCH_TIMEOUT_SECONDS = 2.0
 
 
 def publish_positions(positions: list[dict]) -> None:
-    state = load_publish_state()
-    changed = False
+    """
+    Dedup against the broker's own retained message for each topic, not a local
+    state file. The broker is the source of truth — anyone subscribing to
+    `cars/<slug>` sees the same retained payload we'd compare against.
+    """
+    targets: list[tuple[dict, str, str]] = []
+    for position in positions:
+        topic = f"{MQ_TOPIC_PREFIX}/{topic_from_name(position.get('description', ''))}"
+        payload = json.dumps(position, separators=(",", ":"))
+        targets.append((position, topic, payload))
+
+    expected_topics = {topic for _, topic, _ in targets}
+    retained: dict[str, bytes] = {}
+    all_retained_seen = threading.Event()
+
+    def on_message(client, userdata, msg):
+        if not msg.retain:
+            return
+        retained[msg.topic] = msg.payload
+        if expected_topics.issubset(retained.keys()):
+            all_retained_seen.set()
+
     published_count = 0
     skipped_count = 0
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_message = on_message
     client.connect(MQ_ADDRESS, MQ_PORT, keepalive=60)
     client.loop_start()
     try:
-        for position in positions:
-            device_id = str(position.get("device_id", ""))
-            current_loc = location_key(position)
-            if state.get(device_id) == current_loc:
-                skipped_count += 1
-                print(f"[mq] Skipped {device_id} (location unchanged)")
-                continue
+        for topic in expected_topics:
+            client.subscribe(topic, qos=0)
+        # Either every expected topic delivered a retained message, or we time out
+        # (fresh broker / topics never published before — those publish unconditionally).
+        all_retained_seen.wait(timeout=RETAINED_FETCH_TIMEOUT_SECONDS)
 
-            topic = f"{MQ_TOPIC_PREFIX}/{topic_from_name(position.get('description', ''))}"
-            payload = json.dumps(position, separators=(",", ":"))
-            info = client.publish(topic, payload=payload, qos=0, retain=False)
+        for position, topic, payload in targets:
+            device_id = str(position.get("device_id", ""))
+            existing = retained.get(topic)
+            if existing is not None:
+                ex_lat, ex_lon = _retained_location(existing)
+                if ex_lat == position.get("latitude") and ex_lon == position.get("longitude"):
+                    skipped_count += 1
+                    print(f"[mq] Skipped {device_id} (broker retained location matches)")
+                    continue
+
+            info = client.publish(topic, payload=payload, qos=0, retain=True)
             info.wait_for_publish()
             if info.rc != mqtt.MQTT_ERR_SUCCESS:
                 raise RuntimeError(f"publish failed for topic {topic} with rc={info.rc}")
-
-            state[device_id] = current_loc
-            changed = True
             published_count += 1
             print(f"[mq] Published {device_id} to {topic}")
     finally:
         client.loop_stop()
         client.disconnect()
 
-    if changed:
-        save_publish_state(state)
     print(f"[mq] Publish summary: {published_count} sent, {skipped_count} skipped")
 
 
